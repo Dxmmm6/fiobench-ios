@@ -1,0 +1,94 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate project root
+        id: root
+        shell: bash
+        run: |
+          if [ -f "project.yml" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f "FioBench-iOS/project.yml" ]; then
+            echo "dir=FioBench-iOS" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::project.yml not found. Upload the contents of FioBench-iOS/ to the repository root."
+            exit 1
+          fi
+          echo "Project root: $(cat "$GITHUB_OUTPUT" | tail -1)"
+
+      - name: Show toolchain
+        working-directory: ${{ steps.root.outputs.dir }}
+        run: |
+          if [ -d /Applications/Xcode_16.4.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.4.app
+          fi
+          xcodebuild -version
+          swift --version
+          python3 --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate app icon
+        working-directory: ${{ steps.root.outputs.dir }}
+        run: python3 scripts/make_icon.py
+
+      - name: Generate Xcode project
+        working-directory: ${{ steps.root.outputs.dir }}
+        run: |
+          plutil -lint Support/Info.plist
+          xcodegen generate
+          xcodebuild -list -project FioBench.xcodeproj
+
+      - name: Build for iOS device
+        working-directory: ${{ steps.root.outputs.dir }}
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project FioBench.xcodeproj \
+            -scheme FioBench \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            | tee xcodebuild.log
+
+      - name: Package unsigned IPA
+        working-directory: ${{ steps.root.outputs.dir }}
+        run: bash scripts/package_ipa.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: FioBench-unsigned-ipa
+          path: ${{ steps.root.outputs.dir }}/FioBench-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ steps.root.outputs.dir }}/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
